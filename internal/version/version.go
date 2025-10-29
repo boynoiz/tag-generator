@@ -10,16 +10,16 @@ import (
 const expectedVersionParts = 5
 
 // Calculate determines the next version based on current tag and type
-func Calculate(currentTag string, isFix bool, isStaging bool) (string, error) {
+func Calculate(currentTag string, isFix bool, isStaging bool, prefix string) (string, error) {
 	// If no current tag exists, generate first version
 	if currentTag == "" {
-		newVersion := generateNew()
+		newVersion := generateNew(prefix)
 		return newVersion, nil
 	}
 
 	versionParts, err := split(currentTag)
 	if err != nil || len(versionParts) < expectedVersionParts {
-		newVersion := generateNew()
+		newVersion := generateNew(prefix)
 		return newVersion, nil
 	}
 
@@ -36,7 +36,7 @@ func Calculate(currentTag string, isFix bool, isStaging bool) (string, error) {
 		year, month, week, release, fix = calculateRelease(year, month, week, release)
 	}
 
-	return format(year, month, week, release, fix, isStaging), nil
+	return format(year, month, week, release, fix, isStaging, prefix), nil
 }
 
 func calculateRelease(currentYear, currentMonth, currentWeek, currentRelease int) (int, int, int, int, int) {
@@ -62,22 +62,38 @@ func calculateRelease(currentYear, currentMonth, currentWeek, currentRelease int
 	return year, month, week, release, fix
 }
 
-func format(year, month, week, release, fix int, isStaging bool) string {
+func format(year, month, week, release, fix int, isStaging bool, prefix string) string {
 	version := fmt.Sprintf("%d.%d.%d.%d.%d", year, month, week, release, fix)
 	if isStaging {
-		return version + "-staging"
+		version = version + "-staging"
+	}
+	if prefix != "" {
+		version = prefix + version
 	}
 	return version
 }
 
-func generateNew() string {
-	return fmt.Sprintf("%d.%d.%d.%d.%d", getCurrentYear(), getCurrentMonth(), getWeekOfTheMonth(), 1, 0)
+func generateNew(prefix string) string {
+	version := fmt.Sprintf("%d.%d.%d.%d.%d", getCurrentYear(), getCurrentMonth(), getWeekOfTheMonth(), 1, 0)
+	if prefix != "" {
+		version = prefix + version
+	}
+	return version
 }
 
 func split(version string) ([]int, error) {
 	version = strings.TrimSpace(version)
 	// Remove -staging suffix if present
 	version = strings.TrimSuffix(version, "-staging")
+
+	// Remove any prefix (like "v") before the version number
+	// Find the first digit and start from there
+	for i, c := range version {
+		if c >= '0' && c <= '9' {
+			version = version[i:]
+			break
+		}
+	}
 
 	resultString := strings.Split(version, ".")
 	result := make([]int, len(resultString))

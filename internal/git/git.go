@@ -4,13 +4,8 @@ import (
 	"bytes"
 	"fmt"
 	"os/exec"
-	"regexp"
 	"strings"
 )
-
-const allowBranch = "main"
-
-var branchRegex = regexp.MustCompile(allowBranch)
 
 // GetCurrentTag returns the most recent git tag
 func GetCurrentTag() (string, error) {
@@ -49,20 +44,24 @@ func TagExists(tag string) (string, error) {
 	return execShell("git", "show-ref", "--tags", tag)
 }
 
-// ValidateBranch checks if current branch is allowed
-func ValidateBranch() (bool, error) {
+// IsReleaseBranch checks if current branch matches the configured release branch
+func IsReleaseBranch(releaseBranch string) (bool, error) {
 	branch, err := GetCurrentBranch()
 	if err != nil {
 		return false, fmt.Errorf("failed to check current branch: %w", err)
 	}
 	branch = strings.TrimSpace(branch)
 
-	if !branchRegex.Match([]byte(branch)) {
-		return false, fmt.Errorf("current branch %v is not allowed", branch)
-	}
+	return branch == releaseBranch, nil
+}
 
-	isStaging := strings.TrimSpace(branch) == "staging"
-	return isStaging, nil
+// GetShortHash returns the short git commit hash (7 chars)
+func GetShortHash() (string, error) {
+	hash, err := execShell("git", "rev-parse", "--short=7", "HEAD")
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(hash), nil
 }
 
 func execShell(command string, args ...string) (string, error) {

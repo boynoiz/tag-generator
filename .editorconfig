@@ -1,21 +1,21 @@
-; indicate this is the root of the project
 root = true
 
 [*]
 charset = utf-8
-
-end_of_line = LF
+end_of_line = lf
+indent_size = 4
+indent_style = space
 insert_final_newline = true
+max_line_length = 120
+tab_width = 4
 trim_trailing_whitespace = true
 
-indent_style = space
-indent_size = 4
+[{*.bash,*.sh,*.zsh,kexport}]
+indent_size = 2
+tab_width = 2
 
-[Makefile]
+[{*.go,*.go2}]
 indent_style = tab
 
-[makefile]
-indent_style = tab
-
-[*.go]
-indent_style = tab
+[{*.yaml,*.yml,*playbook.yaml,*playbook.yml,main.yaml,main.yml}]
+indent_size = 2

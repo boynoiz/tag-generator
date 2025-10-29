@@ -1,0 +1,4 @@
+use_prefix: true
+prefix: v
+dev_prefix: dev-
+release_branch: main
