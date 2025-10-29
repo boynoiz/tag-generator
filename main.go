@@ -10,8 +10,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-
-	"github.com/golang-module/carbon/v2"
+	"time"
 )
 
 const (
@@ -203,15 +202,17 @@ func tagAndPush(newVersion string) error {
 }
 
 func getCurrentYear() int {
-	return carbon.Now().Year()
+	return time.Now().Year()
 }
 
 func getCurrentMonth() int {
-	return carbon.Now().Month()
+	return int(time.Now().Month())
 }
 
 func getWeekOfTheMonth() int {
-	return carbon.Now().WeekOfMonth()
+	now := time.Now()
+	// Calculate week of month: (day of month - 1) / 7 + 1
+	return (now.Day()-1)/7 + 1
 }
 
 func getCurrentGitTag() (string, error) {
