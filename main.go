@@ -10,146 +10,196 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/golang-module/carbon/v2"
 )
 
 const (
-	defaultTagType       string = "fix"
-	versionFlagNameLong  string = "version"
-	versionFlagNameShort string = "v"
-	allowBranch          string = "main"
-	usageLong            string = "-version [release|fix]"
-	usageShort           string = "shorthand of 'version'"
-	usageHelper          string = `Usage: %s
+	defaultTagType       = "fix"
+	versionFlagNameLong  = "version"
+	versionFlagNameShort = "v"
+	allowBranch          = "main"
+	usageLong            = "-version [release|fix]"
+	usageShort           = "shorthand of 'version'"
+	usageHelper          = `Usage: %s
 Options:
 `
+	expectedVersionParts = 5
 )
 
-var tagType string
-var newVersion string
+var branchRegex = regexp.MustCompile(allowBranch)
 
 func main() {
+	if err := run(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Fprintf(os.Stdout, "Info: All set, Goodbye\n")
+}
 
+func run() error {
+	// Parse flags
+	tagType := parseFlags()
+
+	// Validate branch
+	isStaging, err := validateBranch()
+	if err != nil {
+		return err
+	}
+
+	// Check if current hash is already tagged
+	if err := checkCurrentHashNotTagged(); err != nil {
+		return err
+	}
+
+	// Calculate new version
+	newVersion, err := calculateNewVersion(tagType, isStaging)
+	if err != nil {
+		return err
+	}
+
+	// Tag and push
+	return tagAndPush(newVersion)
+}
+
+func parseFlags() string {
+	var tagType string
 	flag.StringVar(&tagType, versionFlagNameLong, defaultTagType, usageLong)
 	flag.StringVar(&tagType, versionFlagNameShort, defaultTagType, usageShort)
 	flag.Usage = func() {
-		_, _ = fmt.Fprintf(flag.CommandLine.Output(), usageHelper, os.Args[0])
+		fmt.Fprintf(flag.CommandLine.Output(), usageHelper, os.Args[0])
 		flag.PrintDefaults()
 	}
 	flag.Parse()
+
 	checkFlagIsPassed := isFlagPassed()
 	if !checkFlagIsPassed && tagType != "release" {
 		fmt.Printf("You are not provide the parameter, the default will tagging as 'fix'\n")
 		confirm := askConfirm("Please confirm to continue")
 		if !confirm {
-			_, _ = fmt.Fprintf(os.Stdout, "Alright then, see ya!\n")
+			fmt.Fprintf(os.Stdout, "Alright then, see ya!\n")
 			os.Exit(0)
 		}
 	}
 
-	checkBranchStatus, checkBranchMsgOut, checkBranchMsgError := checkCurrentBranch()
-	if checkBranchStatus != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "Error: %v\n", checkBranchMsgError)
-		os.Exit(1)
+	return tagType
+}
+
+func validateBranch() (bool, error) {
+	checkBranchMsgOut, err := checkCurrentBranch()
+	if err != nil {
+		return false, fmt.Errorf("failed to check current branch: %w", err)
 	}
 	checkBranchMsgOut = strings.TrimSpace(checkBranchMsgOut)
 
-	checkAllowBranch, _ := regexp.Match(allowBranch, []byte(checkBranchMsgOut))
+	checkAllowBranch := branchRegex.Match([]byte(checkBranchMsgOut))
 	if !checkAllowBranch {
-		_, _ = fmt.Fprintf(os.Stderr, "Error: Then current branch %v are not allow in list\n", checkBranchMsgOut)
-		os.Exit(1)
-	}
-	isStaging := false
-	if strings.TrimSpace(checkBranchMsgOut) == "staging" {
-		isStaging = true
+		return false, fmt.Errorf("current branch %v is not allowed", checkBranchMsgOut)
 	}
 
-	_, _ = fmt.Fprintf(os.Stdout, "Info: Checking if current git hash already tagged...\n")
-	currentGitHashStatus, currentGitHashMsgOutput, currentGitHashError := getGitHash()
-	if currentGitHashStatus != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "Error: Could not check git tag\n")
-		_, _ = fmt.Fprintf(os.Stderr, "Error: %v\n", currentGitHashError)
-		os.Exit(1)
+	isStaging := strings.TrimSpace(checkBranchMsgOut) == "staging"
+	return isStaging, nil
+}
+
+func checkCurrentHashNotTagged() error {
+	fmt.Fprintf(os.Stdout, "Info: Checking if current git hash already tagged...\n")
+	currentGitHash, err := getGitHash()
+	if err != nil {
+		return fmt.Errorf("could not check git hash: %w", err)
 	}
 
-	checkIfNeedNewTagStatus, checkIfNeedNewTagMsgOutput, _ := checkGitHashContainTagVersion(currentGitHashMsgOutput)
-	if checkIfNeedNewTagStatus == nil {
-		_, _ = fmt.Fprintf(os.Stderr, "Error: Current git hash %v already contain tag with %v\n", currentGitHashMsgOutput[0:8], checkIfNeedNewTagMsgOutput)
-		os.Exit(0)
+	checkIfNeedNewTagMsgOutput, err := checkGitHashContainTagVersion(currentGitHash)
+	if err == nil {
+		// No error means the hash is already tagged
+		return fmt.Errorf("current git hash %v already contains tag %v", currentGitHash[0:8], checkIfNeedNewTagMsgOutput)
 	}
 
-	currentVersionStatus, currentVersionMsgOut, _ := getCurrentGitTag()
-	countDigit := len(splitVersion(currentVersionMsgOut))
-	if currentVersionStatus != nil || countDigit < 5 {
-		newVersion = generateNewVersion()
-		_, _ = fmt.Fprintf(os.Stdout, "Info: No tag could be found, New tag version will be %s\n", newVersion)
+	return nil
+}
+
+func calculateNewVersion(tagType string, isStaging bool) (string, error) {
+	currentVersionMsgOut, err := getCurrentGitTag()
+	if err != nil {
+		newVersion := generateNewVersion()
+		fmt.Fprintf(os.Stdout, "Info: No tag could be found, New tag version will be %s\n", newVersion)
+		return newVersion, nil
+	}
+
+	versionParts, err := splitVersion(currentVersionMsgOut)
+	if err != nil || len(versionParts) < expectedVersionParts {
+		newVersion := generateNewVersion()
+		fmt.Fprintf(os.Stdout, "Info: Invalid tag format, New tag version will be %s\n", newVersion)
+		return newVersion, nil
+	}
+
+	fmt.Fprintf(os.Stdout, "Info: Current Tag Version is %s\n", currentVersionMsgOut)
+
+	currentYearVersion := versionParts[0]
+	currentMonthVersion := versionParts[1]
+	currentWeekOfTheMonthVersion := versionParts[2]
+	currentReleaseVersion := versionParts[3]
+	currentFixVersion := versionParts[4]
+
+	if tagType == "release" {
+		currentYearVersion, currentMonthVersion, currentWeekOfTheMonthVersion, currentReleaseVersion, currentFixVersion =
+			calculateReleaseVersion(currentYearVersion, currentMonthVersion, currentWeekOfTheMonthVersion, currentReleaseVersion)
+	} else if tagType == "fix" {
+		currentFixVersion = currentFixVersion + 1
+	}
+
+	newVersion := formatVersion(currentYearVersion, currentMonthVersion, currentWeekOfTheMonthVersion, currentReleaseVersion, currentFixVersion, isStaging)
+	fmt.Fprintf(os.Stdout, "Info: New tag version will be %s\n", newVersion)
+
+	// Check if tag already exists
+	_, err = checkGitTagExist(newVersion)
+	if err == nil {
+		return "", fmt.Errorf("new tag version %s already exists, you can only do fix tag version", newVersion)
+	}
+
+	return newVersion, nil
+}
+
+func calculateReleaseVersion(currentYear, currentMonth, currentWeek, currentRelease int) (int, int, int, int, int) {
+	year := currentYear
+	month := currentMonth
+	week := currentWeek
+	release := currentRelease
+	fix := 0
+
+	if getCurrentYear() > year {
+		year = getCurrentYear()
+	}
+	if getCurrentMonth() > month {
+		month = getCurrentMonth()
+	}
+	if week != getWeekOfTheMonth() {
+		week = getWeekOfTheMonth()
+		release = 1
 	} else {
-		_, _ = fmt.Fprintf(os.Stdout, "Info: Current Tag Version is %s\n", currentVersionMsgOut)
-		currentYearVersion := splitVersion(currentVersionMsgOut)[0]
-		currentMonthVersion := splitVersion(currentVersionMsgOut)[1]
-		currentWeekOfTheMonthVersion := splitVersion(currentVersionMsgOut)[2]
-		currentReleaseVersion := splitVersion(currentVersionMsgOut)[3]
-		currentFixVersion := splitVersion(currentVersionMsgOut)[4]
-		if tagType == "release" {
-			// Release on same month but new week
-			// Previous 2022.3.1.1.10
-			// Change to 2022.3.2.1.0
-			// Release on the new month
-			// Previous 2022.4.1.1.10
-			// Change to 2022.5.1.1.0
-			if getCurrentYear() > currentYearVersion {
-				currentYearVersion = getCurrentYear()
-			}
-			if getCurrentMonth() > currentMonthVersion {
-				currentMonthVersion = getCurrentMonth()
-			}
-			if currentWeekOfTheMonthVersion != getWeekOfTheMonth() {
-				currentWeekOfTheMonthVersion = getWeekOfTheMonth()
-				currentReleaseVersion = 1
-				currentFixVersion = 0
-			} else {
-				// Release same week
-				// Previous 2022.3.1.1.10
-				// Change to 2022.3.1.2.0
-				currentReleaseVersion = currentReleaseVersion + 1
-				currentFixVersion = 0
-			}
-		} else if tagType == "fix" {
-			// Keep all previous version except increasing fix number
-			// Previous 2022.3.1.1.10
-			// Change to 2022.3.1.1.11
-			// Previous 2022.12.2.2.10
-			// Change to 2022.12.2.2.11 // But first week of new year 2023
-			currentFixVersion = currentFixVersion + 1
-		}
-		newVersion = fmt.Sprintf("%d.%d.%d.%d.%d-%s", currentYearVersion, currentMonthVersion, currentWeekOfTheMonthVersion, currentReleaseVersion, currentFixVersion, "staging")
-		if isStaging {
-			newVersion = fmt.Sprintf("%d.%d.%d.%d.%d", currentYearVersion, currentMonthVersion, currentWeekOfTheMonthVersion, currentReleaseVersion, currentFixVersion)
-		}
-
-		_, _ = fmt.Fprintf(os.Stdout, "Info: New tag version will be %s\n", newVersion)
-
-		isTagExistStatus, isTagExistMsgOutput, _ := checkGitTagExist(newVersion)
-		if isTagExistStatus == nil {
-			_, _ = fmt.Fprintf(os.Stdout, "%v\n", isTagExistMsgOutput)
-			_, _ = fmt.Fprintf(os.Stderr, "Error: New tag version %s already tagged, You can do only fix tag version\n", newVersion)
-			os.Exit(1)
-		}
+		release = release + 1
 	}
 
-	setNewTagStatus, _, setNewTagError := setNewVersionTag(newVersion)
-	if setNewTagStatus != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "Error: Could not set new tag version %v\n", newVersion)
-		_, _ = fmt.Fprintf(os.Stderr, "%v\n", setNewTagError)
-		os.Exit(1)
+	return year, month, week, release, fix
+}
+
+func formatVersion(year, month, week, release, fix int, isStaging bool) string {
+	if isStaging {
+		return fmt.Sprintf("%d.%d.%d.%d.%d", year, month, week, release, fix)
 	}
-	pushNewTagStatus, _, pushNewTagError := pushNewVersionTag(newVersion)
-	if pushNewTagStatus != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "Error: Could not push new tag version %v to remote repository\n", newVersion)
-		_, _ = fmt.Fprintf(os.Stderr, "%v\n", pushNewTagError)
-		os.Exit(1)
+	return fmt.Sprintf("%d.%d.%d.%d.%d-staging", year, month, week, release, fix)
+}
+
+func tagAndPush(newVersion string) error {
+	if err := setNewVersionTag(newVersion); err != nil {
+		return fmt.Errorf("could not set new tag version %v: %w", newVersion, err)
 	}
-	_, _ = fmt.Fprintf(os.Stdout, "Info: New tag version %v already pushed\n", newVersion)
-	_, _ = fmt.Fprintf(os.Stdout, "Info: All set, Goodbye\n")
+
+	if err := pushNewVersionTag(newVersion); err != nil {
+		return fmt.Errorf("could not push new tag version %v to remote repository: %w", newVersion, err)
+	}
+
+	fmt.Fprintf(os.Stdout, "Info: New tag version %v already pushed\n", newVersion)
+	return nil
 }
 
 func getCurrentYear() int {
@@ -164,59 +214,61 @@ func getWeekOfTheMonth() int {
 	return carbon.Now().WeekOfMonth()
 }
 
-func getCurrentGitTag() (error, string, string) {
-	return execShell("git describe --abbrev=0 --tags")
+func getCurrentGitTag() (string, error) {
+	return execShell("git", "describe", "--abbrev=0", "--tags")
 }
 
-func checkCurrentBranch() (error, string, string) {
-	return execShell("git rev-parse --abbrev-ref HEAD")
+func checkCurrentBranch() (string, error) {
+	return execShell("git", "rev-parse", "--abbrev-ref", "HEAD")
 }
 
-func getGitHash() (error, string, string) {
-	return execShell("git rev-parse HEAD")
+func getGitHash() (string, error) {
+	return execShell("git", "rev-parse", "HEAD")
 }
 
-func checkGitHashContainTagVersion(hash string) (error, string, string) {
-	cmd := "git describe --contains " + hash
-	return execShell(cmd)
+func checkGitHashContainTagVersion(hash string) (string, error) {
+	return execShell("git", "describe", "--contains", hash)
 }
 
-func setNewVersionTag(newVersion string) (error, string, string) {
-	cmd := "git tag " + newVersion
-	return execShell(cmd)
+func setNewVersionTag(newVersion string) error {
+	_, err := execShell("git", "tag", newVersion)
+	return err
 }
 
-func pushNewVersionTag(newVersion string) (error, string, string) {
-	cmd := "git push origin " + newVersion
-	return execShell(cmd)
+func pushNewVersionTag(newVersion string) error {
+	_, err := execShell("git", "push", "origin", newVersion)
+	return err
 }
 
-func checkGitTagExist(tag string) (error, string, string) {
-	cmd := "git show-ref --tags " + tag
-	return execShell(cmd)
+func checkGitTagExist(tag string) (string, error) {
+	return execShell("git", "show-ref", "--tags", tag)
 }
 
-func execShell(command string) (error, string, string) {
+func execShell(command string, args ...string) (string, error) {
 	stdout := bytes.Buffer{}
 	stderr := bytes.Buffer{}
-	cmd := exec.Command("bash", "-c", command)
+	cmd := exec.Command(command, args...)
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	err := cmd.Run()
-	return err, stdout.String(), stderr.String()
+	if err != nil {
+		return "", fmt.Errorf("%w: %s", err, stderr.String())
+	}
+	return stdout.String(), nil
 }
 
-func splitVersion(version string) []int {
-	resultString := strings.Split(string(version), ".")
+func splitVersion(version string) ([]int, error) {
+	version = strings.TrimSpace(version)
+	resultString := strings.Split(version, ".")
 	result := make([]int, len(resultString))
 	for idx, i := range resultString {
 		convert, err := strconv.Atoi(strings.TrimSpace(i))
 		if err != nil {
-			panic(err)
+			return nil, fmt.Errorf("invalid version format: %w", err)
 		}
 		result[idx] = convert
 	}
-	return result
+	return result, nil
 }
 
 func generateNewVersion() string {
@@ -241,7 +293,7 @@ func askConfirm(message string) bool {
 
 		response, err := reader.ReadString('\n')
 		if err != nil {
-			_, _ = fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
 
@@ -251,9 +303,7 @@ func askConfirm(message string) bool {
 			return true
 		} else if response == "n" || response == "no" {
 			return false
-		} else {
-			_, _ = fmt.Fprintf(os.Stderr, "Sorry dude!, I don't know what to mean :?\n")
-			os.Exit(1)
 		}
+		fmt.Fprintf(os.Stderr, "Sorry dude!, I don't know what to mean :?\n")
 	}
 }
