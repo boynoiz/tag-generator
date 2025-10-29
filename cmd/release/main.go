@@ -6,15 +6,27 @@ import (
 	"os"
 	"strings"
 
-	"release-tool/internal/git"
-	"release-tool/internal/prompt"
-	"release-tool/internal/version"
+	"github.com/boynoiz/release-tool/internal/config"
+	"github.com/boynoiz/release-tool/internal/git"
+	"github.com/boynoiz/release-tool/internal/prompt"
+	"github.com/boynoiz/release-tool/internal/version"
 )
 
-const usageHelper = `Usage: release [OPTIONS]
+const usageHelper = `Usage: release [COMMAND] [OPTIONS]
 
-Creates a CalVer git tag with format: Year.Month.Week.Release.Fix
-Examples: 2025.10.4.1.0, 2025.11.1.1.0
+Commands:
+  init              Initialize .release/config.yaml with default settings
+  (no command)      Create a git tag
+
+Tag Creation:
+  - On release branch: Creates CalVer tag (Year.Month.Week.Release.Fix)
+  - On other branches: Creates hash-based tag using git short hash
+
+Examples:
+  release init                    # Initialize config
+  release                         # Create release tag
+  release --fix                   # Create fix/patch tag
+  release -f                      # Short form
 
 Options:
 `
@@ -28,38 +40,73 @@ func main() {
 }
 
 func run() error {
+	// Check for init subcommand
+	if len(os.Args) > 1 && os.Args[1] == "init" {
+		return runInit()
+	}
+
+	// Load config
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+
 	// Parse flags
 	isFix, flagWasPassed := parseFlags()
-
-	// Validate branch
-	isStaging, err := git.ValidateBranch()
-	if err != nil {
-		return err
-	}
 
 	// Check if current hash is already tagged
 	if err := checkCurrentHashNotTagged(); err != nil {
 		return err
 	}
 
-	// Confirm if no flag was passed (default to release)
-	if !flagWasPassed && !isFix {
-		fmt.Printf("No flag provided, creating a release tag by default\n")
-		confirm := prompt.AskConfirm("Please confirm to continue")
-		if !confirm {
-			fmt.Fprintf(os.Stdout, "Alright then, see ya!\n")
-			os.Exit(0)
-		}
-	}
-
-	// Calculate new version
-	newVersion, err := calculateNewVersion(isFix, isStaging)
+	// Check if we're on the release branch
+	isReleaseBranch, err := git.IsReleaseBranch(cfg.ReleaseBranch)
 	if err != nil {
 		return err
 	}
 
+	currentBranch, _ := git.GetCurrentBranch()
+	currentBranch = strings.TrimSpace(currentBranch)
+
+	var newTag string
+	if isReleaseBranch {
+		// On release branch: create CalVer tag
+		if !flagWasPassed && !isFix {
+			fmt.Printf("On release branch '%s', creating a release tag by default\n", cfg.ReleaseBranch)
+			confirm := prompt.AskConfirm("Please confirm to continue")
+			if !confirm {
+				fmt.Fprintf(os.Stdout, "Alright then, see ya!\n")
+				os.Exit(0)
+			}
+		}
+
+		newTag, err = calculateCalVerTag(cfg, isFix)
+		if err != nil {
+			return err
+		}
+	} else {
+		// Not on release branch: create hash-based tag
+		fmt.Printf("Not on release branch (current: '%s', release: '%s')\n", currentBranch, cfg.ReleaseBranch)
+		fmt.Printf("Creating hash-based tag instead...\n")
+
+		newTag, err = createHashTag(cfg)
+		if err != nil {
+			return err
+		}
+	}
+
 	// Tag and push
-	return tagAndPush(newVersion)
+	return tagAndPush(newTag)
+}
+
+func runInit() error {
+	if err := config.Init(); err != nil {
+		return err
+	}
+
+	fmt.Fprintf(os.Stdout, "Info: Config file created at .release/config.yaml\n")
+	fmt.Fprintf(os.Stdout, "Info: You can edit it to customize prefix and release branch\n")
+	return nil
 }
 
 func parseFlags() (bool, bool) {
@@ -99,10 +146,15 @@ func checkCurrentHashNotTagged() error {
 	return nil
 }
 
-func calculateNewVersion(isFix bool, isStaging bool) (string, error) {
+func calculateCalVerTag(cfg *config.Config, isFix bool) (string, error) {
+	prefix := ""
+	if cfg.UsePrefix {
+		prefix = cfg.Prefix
+	}
+
 	currentTag, err := git.GetCurrentTag()
 	if err != nil {
-		newVersion, err := version.Calculate("", isFix, isStaging)
+		newVersion, err := version.Calculate("", isFix, false, prefix)
 		if err != nil {
 			return "", err
 		}
@@ -113,7 +165,7 @@ func calculateNewVersion(isFix bool, isStaging bool) (string, error) {
 	currentTag = strings.TrimSpace(currentTag)
 	fmt.Fprintf(os.Stdout, "Info: Current tag version is %s\n", currentTag)
 
-	newVersion, err := version.Calculate(currentTag, isFix, isStaging)
+	newVersion, err := version.Calculate(currentTag, isFix, false, prefix)
 	if err != nil {
 		return "", err
 	}
@@ -129,15 +181,34 @@ func calculateNewVersion(isFix bool, isStaging bool) (string, error) {
 	return newVersion, nil
 }
 
-func tagAndPush(newVersion string) error {
-	if err := git.CreateTag(newVersion); err != nil {
-		return fmt.Errorf("could not set new tag version %v: %w", newVersion, err)
+func createHashTag(cfg *config.Config) (string, error) {
+	shortHash, err := git.GetShortHash()
+	if err != nil {
+		return "", fmt.Errorf("failed to get git hash: %w", err)
 	}
 
-	if err := git.PushTag(newVersion); err != nil {
-		return fmt.Errorf("could not push new tag version %v to remote repository: %w", newVersion, err)
+	tag := cfg.DevPrefix + shortHash
+
+	fmt.Fprintf(os.Stdout, "Info: New hash-based tag will be %s\n", tag)
+
+	// Check if tag already exists
+	_, err = git.TagExists(tag)
+	if err == nil {
+		return "", fmt.Errorf("tag %s already exists", tag)
 	}
 
-	fmt.Fprintf(os.Stdout, "Info: New tag version %v already pushed\n", newVersion)
+	return tag, nil
+}
+
+func tagAndPush(newTag string) error {
+	if err := git.CreateTag(newTag); err != nil {
+		return fmt.Errorf("could not create tag %v: %w", newTag, err)
+	}
+
+	if err := git.PushTag(newTag); err != nil {
+		return fmt.Errorf("could not push tag %v to remote repository: %w", newTag, err)
+	}
+
+	fmt.Fprintf(os.Stdout, "Info: New tag %v created and pushed\n", newTag)
 	return nil
 }
